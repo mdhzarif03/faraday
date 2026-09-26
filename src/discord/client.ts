@@ -1,23 +1,14 @@
 import { Client, GatewayIntentBits } from "discord.js";
-
-const token = process.env.DISCORD_BOT_TOKEN;
-
-if (!token) {
-  throw new Error("DISCORD_BOT_TOKEN is missing from .env");
+import { config } from "../config/env.js";
+let client: Client | undefined;
+let loginPromise: Promise<string> | undefined;
+export function getDiscordClient(): Client {
+  if (!client) client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
+  return client;
 }
-
-export const discordClient = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
-});
-
-discordClient.once("clientReady", (client) => {
-  console.log(`Discord connected as ${client.user.tag}`);
-});
-
-export async function startDiscord() {
-  await discordClient.login(token);
+export function startDiscord(): Promise<string> {
+  if (loginPromise) return loginPromise;
+  loginPromise = getDiscordClient().login(config.discordToken).catch((error: unknown) => { loginPromise = undefined; throw error; });
+  return loginPromise;
 }
+export async function stopDiscord(): Promise<void> { if (client?.isReady()) await client.destroy(); client = undefined; loginPromise = undefined; }

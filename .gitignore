@@ -6,6 +6,9 @@ dist/
 
 credentials.json
 token.json
+*.tokens.json
+coverage/
+.test-dist/
 *.log
 
 .DS_Store
