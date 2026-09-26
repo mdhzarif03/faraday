@@ -8,6 +8,9 @@ import { isAuthorized } from "../src/discord/handlers.js";
 import { maskSensitiveText, transformEmailMetadata } from "../src/google/gmail.js";
 import { transformContacts } from "../src/google/contacts.js";
 import { OllamaProvider } from "../src/agent/ollama.js";
+import { encryptTokenPayload, decryptTokenPayload, validateTokenEncryptionKey } from "../src/security/encryption.js";
+import { createSignedOAuthState, verifySignedOAuthState } from "../src/google/oauth-state.js";
+import healthHandler from "../api/health.js";
 import { getDiscordClient } from "../src/discord/client.js";
 import { registerDiscordHandlers } from "../src/discord/handlers.js";
 
@@ -164,4 +167,39 @@ test("health endpoint returns the minimal service status", async () => {
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { status: "ok", service: "faraday" });
   } finally { await stopOAuthServer(); }
+});
+
+test("Vercel health handler returns only the public health payload", () => {
+  let status = 0;
+  let payload = "";
+  const response = {
+    writeHead(code: number) { status = code; return this; },
+    end(body?: string) { payload = body ?? ""; },
+  };
+  healthHandler({ method: "GET" } as never, response as never);
+  assert.equal(status, 200);
+  assert.deepEqual(JSON.parse(payload), { status: "ok", service: "faraday" });
+  assert.equal(payload.includes("token"), false);
+});
+
+test("signed OAuth state is valid only for its secret and short time window", () => {
+  const secret = "test-secret-material-with-at-least-32-bytes";
+  const now = 1_000_000;
+  const state = createSignedOAuthState(secret, now);
+  assert.equal(verifySignedOAuthState(state, secret, now + 1_000), true);
+  assert.equal(verifySignedOAuthState(state, "different-secret-material-with-32-bytes", now + 1_000), false);
+  assert.equal(verifySignedOAuthState(state, secret, now + 700_000), false);
+  assert.equal(verifySignedOAuthState(`${state}x`, secret, now + 1_000), false);
+});
+
+test("PostgreSQL token payload encryption authenticates and hides the original value", () => {
+  const key = Buffer.alloc(32, 7).toString("base64");
+  const source = JSON.stringify({ refresh_token: "test-only-secret" });
+  const encrypted = encryptTokenPayload(source, key);
+  assert.notEqual(encrypted, source);
+  assert.equal(decryptTokenPayload(encrypted, key), source);
+  assert.equal(validateTokenEncryptionKey(key), true);
+  assert.equal(validateTokenEncryptionKey("too-short"), false);
+  const altered = `${encrypted.slice(0, -1)}${encrypted.endsWith("A") ? "B" : "A"}`;
+  assert.throws(() => decryptTokenPayload(altered, key));
 });

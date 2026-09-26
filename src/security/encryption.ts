@@ -7,6 +7,9 @@ function encryptionKey(material = config.tokenEncryptionKey): Buffer {
   if (key.length !== 32) throw new Error("TOKEN_ENCRYPTION_KEY must encode exactly 32 bytes as hex or base64.");
   return key;
 }
+export function validateTokenEncryptionKey(material = config.tokenEncryptionKey): boolean {
+  try { encryptionKey(material); return true; } catch { return false; }
+}
 
 export function encryptTokenPayload(plaintext: string, material?: string): string {
   const iv = randomBytes(12);

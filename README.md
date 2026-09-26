@@ -1,154 +1,141 @@
 # Faraday
 
-Faraday is a private, open-source assistant operated through Discord. Each installation runs its own Discord worker, local Ollama model, Google OAuth client, and data storage. The default setup requires no hosted AI API or paid model subscription.
+Faraday is a private, open-source, self-hostable assistant controlled through Discord. A local installation runs a persistent Discord worker with its own Ollama model and Google account. An optional HTTP/API deployment can run independently on Vercel.
 
-## Current status
+## Status
 
 ### Implemented
 
-- Discord message invocation with user and optional guild allowlists.
-- Local Ollama provider abstraction, defaulting to `qwen3:1.7b`, using Ollama's chat API and native tool definitions.
-- Bounded tool-call parser/repair handling. Model output is never sent as raw tool JSON.
-- Read-only Gmail metadata listing/search, explicit email reading and local-model email summaries.
-- Google Contacts search.
-- Email-code/credential masking, minimal metadata results, and per-user observed-message ID checks for reads.
-- Local Google OAuth callback with state validation and a file-backed token store.
-- Minimal `/health` endpoint, structured privacy-conscious logs, PostgreSQL-ready boundaries, and confirmation-store groundwork.
+- Discord worker with explicit `Faraday` invocation, user allowlist, and optional guild allowlist.
+- Local Ollama provider (`qwen3:1.7b` by default), native tool calling, bounded repair, and a deterministic fallback for clear email/contact requests.
+- Read-only Gmail recent-message listing, Gmail search, email reading and summarization, and Google Contacts search.
+- Typed tool validation; only registered tools are available to the model. No write or destructive email tools are registered.
+- Local file OAuth token storage, or encrypted PostgreSQL token storage when `DATABASE_URL` and `TOKEN_ENCRYPTION_KEY` are configured.
+- Separate local HTTP server for `/health`, `/auth`, and `/oauth2callback`.
+- Vercel function routes for `/api/health`, `/api/auth`, and `/api/oauth2callback`.
+- Vercel OAuth state signing and encrypted token persistence through PostgreSQL.
 
 ### Planned / not implemented
 
-- Draft creation, sending, replying, forwarding, deletion, and any other Gmail write operation. OAuth scopes remain read-only. The confirmation store is not currently connected to any action tool.
-- PostgreSQL-backed repositories and encrypted production token persistence. `DATABASE_URL` is documented for the next storage adapter; local read-only operation does not require it.
-- Vercel API routes or hosted OAuth management. A persistent Discord gateway must run as a separate worker. Vercel cannot reach a developer machine's `127.0.0.1` Ollama endpoint.
-- Durable conversation history, multi-installation management, and tool audit persistence.
+- Draft, send, reply, forward, delete, or other Gmail write operations. Google scopes remain read-only.
+- PostgreSQL repositories for general users, conversations, confirmations, or audit history. PostgreSQL currently stores only the encrypted OAuth token payload.
+- A web management interface and production deployment automation.
 
 ## Architecture
 
 ```text
-Discord message
-  -> Discord handler (allowlist + explicit Faraday invocation)
-  -> application agent service
-  -> AIProvider (Ollama by default)
-  -> typed tool registry (schema validation + permission check)
-  -> Gmail / People service
-  -> untrusted, minimized tool result
-  -> local model response
-  -> Discord reply
+Local worker                         Local HTTP server
+Discord Gateway                      /health, /auth, /oauth2callback
+  -> agent                              -> Google OAuth
+  -> Ollama                             -> file or PostgreSQL token store
+  -> typed read-only tools
+  -> Gmail / Google Contacts
+
+Vercel
+  -> api/health.ts
+  -> api/auth.ts
+  -> api/oauth2callback.ts
+  -> PostgreSQL encrypted token store
 ```
 
-The Discord layer does not contain Google business logic. Google services do not call the model. Tools accept application context rather than Discord message objects. Only registered capabilities are described to the agent. Email text is treated as untrusted data.
-
-Key source areas:
-
-- `src/agent/`: provider, routing, parsing, response generation, tool registry.
-- `src/discord/`: singleton client, authorization, message handling.
-- `src/google/`: OAuth, token storage, Gmail and Contacts services.
-- `src/config/`: centralized environment parsing and startup validation.
-- `src/security/`: confirmation primitives and security helpers.
-- `src/index.ts`: local worker lifecycle.
+The worker and local HTTP server have independent entrypoints and processes. Vercel functions import only the HTTP/OAuth code paths; they do not start Discord or call Ollama. `http://127.0.0.1:11434` refers to the worker's host and cannot reach a self-hoster's machine from Vercel.
 
 ## Requirements
 
-- Node.js 24.x (Node 20+ may work but is not the development target).
-- Ollama installed locally.
-- A Discord application/bot.
-- A Google Cloud project with Gmail API and People API enabled for account access.
-- PostgreSQL is optional for this local read-only phase.
+- Node.js 24.x
+- Ollama for the local worker
+- A Discord application and bot for the local worker
+- Google Cloud OAuth credentials with Gmail API and People API enabled
+- PostgreSQL only when shared/deployed OAuth token storage is needed
 
-## Local installation
+## Install and configure
 
 ```bash
 git clone https://github.com/mdhzarif03/faraday.git
 cd faraday
 npm install
+Copy-Item .env.example .env
 ```
 
-### Ollama
+Configure your own installation credentials in `.env`. `DISCORD_ALLOWED_USER_IDS` must include at least one trusted account ID before the worker starts. IDs can be comma-separated. `DISCORD_ALLOWED_GUILD_IDS` is optional. Never commit `.env`, `token.json`, or database credentials.
 
-Start Ollama and fetch the model:
+### Ollama and Discord
 
 ```bash
 ollama serve
 ollama pull qwen3:1.7b
 ```
 
-Faraday keeps the model warm for ten minutes and uses low-temperature, bounded generations. On CPU-limited machines the first response can take time. `OLLAMA_BASE_URL` and `OLLAMA_MODEL` can be changed per installation.
+Create your own Discord application/bot, enable the Message Content intent, and set its token and allowlists. Faraday responds only to messages beginning with `Faraday`.
 
-### Discord bot
+### Google OAuth
 
-Create a Discord application and bot in the Discord Developer Portal, enable the Message Content intent, and invite the bot to your server with permission to view/send messages. Copy `.env.example` to `.env`. Set the bot token and at least one trusted Discord user ID in `DISCORD_ALLOWED_USER_IDS`. IDs are comma-separated. `DISCORD_ALLOWED_GUILD_IDS` is optional; when set, the bot responds only in those guilds. Direct messages still require the user allowlist.
-
-Faraday ignores ordinary chat and responds only to messages beginning with `Faraday`, such as `Faraday show my recent emails`.
-
-### Google Cloud and OAuth
-
-Create OAuth client credentials in your own Google Cloud project. Enable Gmail API and People API. Configure the OAuth client redirect URL exactly as `http://localhost:3000/oauth2callback` (or your selected `PORT`). Use your own client ID and client secret. Start Faraday, then open `http://localhost:3000/auth` locally to consent.
-
-The requested scopes are read-only:
+Create OAuth credentials in your own Google Cloud project and configure these exact read-only scopes:
 
 - `https://www.googleapis.com/auth/gmail.readonly`
 - `https://www.googleapis.com/auth/contacts.readonly`
 
-No send, draft, modify, or delete scope is requested. A future write feature must explicitly upgrade scopes and require re-consent. The local token file is `token.json` by default and is ignored by Git; keep the machine and file protected. No token values are logged or sent to the model.
+For local development, set `GOOGLE_REDIRECT_URI=http://localhost:3000/oauth2callback`, start the local HTTP server, and open `http://localhost:3000/auth`. Register the redirect URI in the Google OAuth client. No Gmail write permission is requested.
 
-### Environment
+For Vercel, configure `GOOGLE_REDIRECT_URI=https://<your-domain>/api/oauth2callback` in the Vercel environment and register that URI with Google. Also set `GOOGLE_OAUTH_STATE_SECRET` to at least 32 characters, `DATABASE_URL`, and `TOKEN_ENCRYPTION_KEY`. Generate a unique random 32-byte encryption key, encoded as 64 hex characters or base64. Use the same database and encryption key for the Vercel API and any worker that needs to read those tokens. Keep the key in the deployment's secret environment settings.
+
+OAuth tokens saved to PostgreSQL are encrypted with AES-256-GCM. The PostgreSQL table is initialized by the token-store adapter. Local development without `DATABASE_URL` continues to use ignored `token.json` file storage.
+
+## Configuration
+
+See `.env.example`. Main settings:
 
 ```dotenv
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen3:1.7b
 DISCORD_BOT_TOKEN=
 DISCORD_CLIENT_ID=
-DISCORD_ALLOWED_USER_IDS=123456789012345678
+DISCORD_ALLOWED_USER_IDS=
 DISCORD_ALLOWED_GUILD_IDS=
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REDIRECT_URI=http://localhost:3000/oauth2callback
-GOOGLE_TOKEN_FILE=token.json
+GOOGLE_OAUTH_STATE_SECRET=
 DATABASE_URL=
-OLLAMA_BASE_URL=http://127.0.0.1:11434
-OLLAMA_MODEL=qwen3:1.7b
+TOKEN_ENCRYPTION_KEY=
 PORT=3000
 ```
 
-`DISCORD_BOT_TOKEN` and a non-empty user allowlist are required to start the worker. Google OAuth values can be omitted if Google tools are not configured yet; Google-backed requests then return a safe error. PostgreSQL is optional for local mode. `.env.example` contains placeholders only.
+The example file contains placeholders only. `TOKEN_ENCRYPTION_KEY` is needed only with PostgreSQL token storage. Vercel OAuth additionally requires PostgreSQL, the encryption key, and the signed-state secret; the Vercel health route does not require credentials.
 
-### Run
+## Run
 
-```bash
-npm run dev
-```
-
-For a compiled run:
+Run these in separate terminals for a complete local setup:
 
 ```bash
-npm run build
-npm start
+npm run dev:worker
+npm run dev:server
 ```
 
-`GET /health` returns only `{"status":"ok","service":"faraday"}`. The local HTTP server binds to loopback. OAuth callback handling is intended for a local installation in this phase.
+`npm run dev` is an alias for the worker only. Production equivalents are `npm start` for the Discord worker and `npm run start:server` for local HTTP/OAuth. The Vercel deployment serves `/api/health`, `/api/auth`, and `/api/oauth2callback`; it does not run the worker.
 
-## Data and privacy
+## API endpoints
 
-Recent and search results include only message ID, thread ID, sender, subject, and date. Gmail snippets and bodies are not requested for list operations. Email body text is fetched only for explicit read/summarize operations, capped before inference, and filtered for common credential/code patterns. Emails are untrusted input and cannot issue tool instructions. Email bodies, tokens, credentials, and raw exceptions are not logged. In-memory per-user session state retains only recently surfaced message IDs and is not durable.
+- Local `GET /health` returns `{"status":"ok","service":"faraday"}`.
+- Vercel `GET /api/health` returns the same minimal JSON response.
+- Local OAuth uses `/auth` and `/oauth2callback`.
+- Vercel OAuth uses `/api/auth` and `/api/oauth2callback`.
 
-Each installation uses its own Discord bot credentials, Google OAuth client, token storage, environment configuration, and (when added) database. Maintainers do not provide shared user credentials or receive user data.
+Health responses do not expose configuration or infrastructure details.
 
-## Database and deployment direction
+## Privacy and security
 
-`DATABASE_URL` reserves configuration for a PostgreSQL-compatible storage adapter. Neon is one possible PostgreSQL host, not an application dependency. Local operation currently uses file-backed OAuth tokens and in-memory session/confirmation state; production-grade encrypted PostgreSQL token storage is not implemented yet.
+- Every installation supplies its own Discord bot, Google OAuth client, tokens, and environment configuration.
+- Discord user authorization is enforced in application code; guild authorization is optional and additive.
+- Listing/search calls request metadata only. Snippets and bodies are not included in those tool results.
+- Email bodies are fetched only for explicit read/summarize operations, truncated and sanitized before inference, and treated as untrusted data.
+- The model cannot authorize tools. Tool permissions and argument validation are enforced in application code.
+- No send/modify/delete scopes or tools are enabled. Write actions require a deliberate future scope and confirmation design.
+- Tokens, email bodies, credentials, and raw exception messages are not logged.
 
-The local deployment is a persistent Discord worker plus local Ollama, Google APIs, and optional PostgreSQL. A future Vercel deployment can host short-lived HTTP/API routes and OAuth management backed by PostgreSQL, but the Discord gateway worker remains a separate persistent process. Local Ollama must not be configured as `127.0.0.1` from a remote Vercel function.
+See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
-## Security
-
-- Use a unique bot, Google OAuth client, token file, and database for each installation.
-- Restrict Discord use with `DISCORD_ALLOWED_USER_IDS`; optionally restrict guilds too.
-- Keep `.env`, `token.json`, database credentials, and OAuth secrets out of source control.
-- Review Google consent scopes. Current functionality is read-only.
-- Do not expose Ollama or Faraday's local HTTP service to untrusted networks without adding an authenticated deployment boundary.
-- Write and destructive tools are absent. Confirmation primitives bind the user, guild/channel, operation arguments, and expiry, but cannot execute an operation by themselves.
-
-See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
-
-## Commands and tests
+## Build and tests
 
 ```bash
 npm run build
@@ -156,12 +143,8 @@ npm test
 npm run lint
 ```
 
-Tests use mocked/local components and do not require access to a real Gmail account. `lint` currently runs the strict TypeScript checker; a separate style-lint configuration is not yet provided.
+The build and lint commands type-check both the local source and Vercel API routes. Tests do not require a real Gmail account or deployed Vercel project.
 
-## Contributing
+## Contributing and license
 
-Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md), keep services separated from Discord, preserve least-privilege OAuth scopes, and add tests for new tools and authorization boundaries.
-
-## License
-
-MIT. See [LICENCE](LICENCE).
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes. Faraday is MIT licensed; see [LICENCE](LICENCE).

@@ -2,13 +2,15 @@ node_modules/
 dist/
 .env
 .env.local
-.env.*.local
+.env.*
+!.env.example
 
 credentials.json
 token.json
 *.tokens.json
 coverage/
 .test-dist/
+.vercel/
 *.log
 
 .DS_Store
