@@ -1,0 +1,17 @@
+node_modules/
+.next/
+dist/
+build/
+
+.env
+.env.local
+.env.*.local
+
+*.log
+
+credentials.json
+token.json
+oauth-credentials.json
+
+.DS_Store
+Thumbs.db
