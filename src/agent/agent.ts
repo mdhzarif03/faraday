@@ -31,6 +31,30 @@ export function parseToolCall(raw: string): { name: string; arguments: unknown }
 }
 function rawToolLike(value: string): boolean { return /<tool_call>|"name"\s*:|```json/i.test(value); }
 function safeReply(value: string): string { const trimmed = value.trim(); return !trimmed || rawToolLike(trimmed) ? "I couldn't safely understand that request. Please try asking in a different way." : trimmed.slice(0, 1900); }
+function expectsRegisteredDataTool(message: string): boolean {
+  return /\b(?:show|find|search|read|summari[sz]e|list|get|check|look\s+up)\b/i.test(message) &&
+    /\b(?:emails?|mail|inbox|contacts?|people)\b/i.test(message);
+}
+export function deterministicToolFallback(message: string): { name: string; arguments: Record<string, unknown> } | null {
+  const normalized = message.replace(/^\s*faraday[\s,:-]*/i, "").trim();
+  const emailIntent = /\b(?:email|emails|mail|inbox)\b/i.test(normalized);
+  const searchIntent = /\b(?:find|search|look\s+up)\b/i.test(normalized);
+  const recentIntent = /\b(?:recent|latest|newest)\b/i.test(normalized);
+  if (emailIntent && recentIntent && /\b(?:show|list|get|check|what|any)\b/i.test(normalized)) {
+    return { name: "get_recent_emails", arguments: { limit: 5 } };
+  }
+  if (emailIntent && searchIntent) {
+    const from = normalized.match(/\bfrom\s+(.+?)(?=\s+\b(?:about|with|subject|after|before)\b|[?.!,]|$)/i)?.[1]?.trim();
+    const about = normalized.match(/\babout\s+(.+?)(?=[?.!,]|$)/i)?.[1]?.trim();
+    if (from && from.length <= 180) return { name: "search_emails", arguments: { query: `from:${from.includes(" ") ? `(${from})` : from}`, limit: 5 } };
+    if (about && about.length <= 180) return { name: "search_emails", arguments: { query: about, limit: 5 } };
+  }
+  if (/\b(?:find|search|look\s+up)\b/i.test(normalized) && /\bcontacts?\b/i.test(normalized)) {
+    const query = normalized.replace(/\b(?:find|search|look\s+up|my|contacts?)\b/gi, " ").replace(/\s+/g, " ").trim();
+    if (query) return { name: "search_contacts", arguments: { query: query.slice(0, 200), limit: 5 } };
+  }
+  return null;
+}
 
 export class FaradayAgent {
   constructor(private readonly provider: AIProvider = ollamaProvider) {}
@@ -43,10 +67,11 @@ export class FaradayAgent {
     let routing = await this.provider.generate([{ role: "system", content: system }, { role: "user", content: userMessage }], providerTools(), { temperature: 0.1, maxTokens: 240 });
     let call = routing.toolCalls.length ? routing.toolCalls[0] : parseToolCall(routing.content);
     if (!call) {
-      if (rawToolLike(routing.content)) {
-        routing = await this.provider.generate([{ role: "system", content: `${system}\nReturn either a concise normal answer or exactly one valid tool call using the supplied tool definitions. Do not emit malformed JSON.` }, { role: "user", content: userMessage }], providerTools(), { temperature: 0, maxTokens: 200 });
+      if (rawToolLike(routing.content) || expectsRegisteredDataTool(userMessage)) {
+        routing = await this.provider.generate([{ role: "system", content: `${system}\nThe user's request needs account data. Return one valid call to the single most relevant registered READ tool using the supplied definitions. Never invent email IDs; if a required reference is unavailable, ask the user for it. Do not return JSON as ordinary text.` }, { role: "user", content: userMessage }], providerTools(), { temperature: 0, maxTokens: 200 });
         call = routing.toolCalls[0] ?? parseToolCall(routing.content);
       }
+      if (!call) call = deterministicToolFallback(userMessage);
       if (!call) return { response: safeReply(routing.content) };
     }
     let validated: ValidatedToolExecution;

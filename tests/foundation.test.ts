@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseToolCall, FaradayAgent } from "../src/agent/agent.js";
+import { parseToolCall, FaradayAgent, deterministicToolFallback } from "../src/agent/agent.js";
 import { toolRegistry, executeTool } from "../src/agent/tools.js";
 import type { AIProvider, ProviderMessage, ProviderResult, ProviderTool } from "../src/agent/provider.js";
 import { ConfirmationStore, requiresConfirmation } from "../src/security/permissions.js";
@@ -20,6 +20,12 @@ test("tool parser accepts raw, whitespace, fenced, tagged and explanatory JSON",
     'I will search now: {"name":"search_emails","arguments":{"query":"OpenAI"}} done.',
   ]) assert.equal(parseToolCall(value)?.name, "search_emails");
   assert.equal(parseToolCall("{bad json}"), null);
+});
+
+test("deterministic fallback routes only clear recent-email and sender-search requests", () => {
+  assert.deepEqual(deterministicToolFallback("Faraday show me my recent emails"), { name: "get_recent_emails", arguments: { limit: 5 } });
+  assert.deepEqual(deterministicToolFallback("Faraday find emails from OpenAI"), { name: "search_emails", arguments: { query: "from:OpenAI", limit: 5 } });
+  assert.equal(deterministicToolFallback("Faraday read this email"), null);
 });
 
 test("registry validates bounded arguments and refuses unknown or non-read operations", async () => {
@@ -48,6 +54,35 @@ test("Discord client is a singleton with exactly one message handler after repea
   registerDiscordHandlers(first);
   registerDiscordHandlers(first);
   assert.equal(first.listenerCount("messageCreate"), 1);
+});
+
+test("Discord event flow ignores unauthorized users and replies exactly once for an authorized invocation", async () => {
+  const { Client } = await import("discord.js");
+  const client = new Client({ intents: [] });
+  let calls = 0;
+  let replies = 0;
+  let finishReply: (() => void) | undefined;
+  const replySent = new Promise<void>((resolve) => { finishReply = resolve; });
+  const agent = { async run() { calls++; return { response: "I am ready." }; } };
+  const authorize = (userId: string) => userId === "authorized";
+  registerDiscordHandlers(client, agent, authorize);
+  registerDiscordHandlers(client, agent, authorize);
+  assert.equal(client.listenerCount("messageCreate"), 1);
+  const emit = (userId: string) => client.emit("messageCreate", {
+    author: { id: userId, bot: false }, guildId: "guild", content: "Faraday how are you?",
+    channel: { sendTyping: async () => undefined },
+    reply: async () => { replies++; finishReply?.(); return {} as never; },
+  } as never);
+  emit("unauthorized");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls, 0);
+  assert.equal(replies, 0);
+  emit("authorized");
+  await replySent;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+  assert.equal(replies, 1);
+  client.destroy();
 });
 
 test("confirmation is tied to user, location, action, exact args, expires and is one-use", () => {
@@ -82,9 +117,27 @@ test("agent handles malformed routing once and never leaks malformed model outpu
     }
   }
   const provider = new FakeProvider();
-  const result = await new FaradayAgent(provider).run("Faraday show recent emails", "test-user");
+  const result = await new FaradayAgent(provider).run("Faraday do something unknown", "test-user");
   assert.equal(provider.calls, 2);
   assert.match(result.response, /couldn't safely understand/i);
+  assert.equal(result.response.includes("<tool_call>"), false);
+});
+
+test("agent retries a plain non-tool answer once for an explicit account-data request", async () => {
+  class FakeProvider implements AIProvider {
+    calls = 0;
+    async ask(): Promise<string> { return ""; }
+    async generate(): Promise<ProviderResult> {
+      this.calls++;
+      return this.calls === 1
+        ? { content: "I can help with that.", toolCalls: [] }
+        : { content: "Which emails should I look for?", toolCalls: [] };
+    }
+  }
+  const provider = new FakeProvider();
+  const result = await new FaradayAgent(provider).run("Faraday read this email", "repair-route-user");
+  assert.equal(provider.calls, 2);
+  assert.equal(result.toolUsed, undefined);
   assert.equal(result.response.includes("<tool_call>"), false);
 });
 

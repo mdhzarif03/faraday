@@ -8,8 +8,10 @@ const unauthorizedMessage = "This Faraday installation is not authorized for you
 export function isAuthorized(userId: string, guildId: string | null, users = config.allowedUserIds, guilds = config.allowedGuildIds): boolean {
   return users.has(userId) && (!guildId || guilds.size === 0 || guilds.has(guildId));
 }
-export async function handleMessage(message: Message): Promise<void> {
-  if (message.author.bot || !isAuthorized(message.author.id, message.guildId)) return;
+export interface AgentRunner { run(message: string, userId: string): Promise<{ response: string; toolUsed?: string }>; }
+export type Authorizer = (userId: string, guildId: string | null) => boolean;
+export async function handleMessage(message: Message, agent: AgentRunner = faradayAgent, authorize: Authorizer = isAuthorized): Promise<void> {
+  if (message.author.bot || !authorize(message.author.id, message.guildId)) return;
   const match = message.content.trim().match(invoker);
   if (!match) return;
   const started = Date.now();
@@ -17,7 +19,7 @@ export async function handleMessage(message: Message): Promise<void> {
     const prompt = match[1]?.trim();
     if (!prompt) { await message.reply("I'm here. What do you need?"); return; }
     if ("sendTyping" in message.channel) await message.channel.sendTyping();
-    const result = await faradayAgent.run(prompt, message.author.id);
+    const result = await agent.run(prompt, message.author.id);
     await message.reply(result.response);
     log("tool_request", { userId: message.author.id, tool: result.toolUsed ?? "none", success: true, durationMs: Date.now() - started });
   } catch (error) {
@@ -26,9 +28,9 @@ export async function handleMessage(message: Message): Promise<void> {
     await message.reply("Sorry, I couldn't process that request right now.").catch(() => undefined);
   }
 }
-export function registerDiscordHandlers(client: Client): void {
+export function registerDiscordHandlers(client: Client, agent: AgentRunner = faradayAgent, authorize: Authorizer = isAuthorized): void {
   if (client.listenerCount("messageCreate") > 0) return;
-  client.on("messageCreate", (message) => { void handleMessage(message).catch(() => undefined); });
+  client.on("messageCreate", (message) => { void handleMessage(message, agent, authorize).catch(() => undefined); });
   client.once("clientReady", () => log("discord_ready"));
 }
 export { unauthorizedMessage };

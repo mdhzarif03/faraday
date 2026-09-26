@@ -16,7 +16,7 @@ export function startOAuthServer(): http.Server {
     if (!config.googleConfigured) { html(res, 503, "Google OAuth is not configured for this installation."); return; }
     if (url.pathname === "/auth") {
       oauthState = randomBytes(24).toString("hex");
-      const authUrl = new URL(getGoogleAuthUrl()); authUrl.searchParams.set("state", oauthState);
+      const authUrl = new URL(getGoogleAuthUrl(oauthState));
       res.writeHead(302, { Location: authUrl.toString(), "Cache-Control": "no-store" }); res.end(); return;
     }
     if (url.pathname === "/oauth2callback") {
