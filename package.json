@@ -21,11 +21,8 @@
   "author": "",
   "license": "ISC",
   "type": "module",
-  "bugs": {
-    "url": "https://github.com/mdhzarif03/faraday/issues"
-  },
-  "homepage": "https://github.com/mdhzarif03/faraday#readme",
   "dependencies": {
+    "@types/node": "^26.6.3",
     "discord.js": "^14.27.0",
     "dotenv": "^18.0.4",
     "googleapis": "^182.0.0",
@@ -34,8 +31,9 @@
     "typescript": "^7.0.2"
   },
   "devDependencies": {
-    "@types/node": "^26.6.3",
     "@types/pg": "^8.23.1"
   },
-  "engines": { "node": "24.x" }
+  "engines": {
+    "node": "24.x"
+  }
 }
